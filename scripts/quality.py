@@ -4,7 +4,8 @@ import time
 from dataclasses import replace
 
 from app.domain import build_static, ConfigError
-from app.planner import plan_best, diagnose
+from app.planner import find_earliest_plan as plan_best
+from app.planner import diagnose
 from app.runner import Runner
 
 

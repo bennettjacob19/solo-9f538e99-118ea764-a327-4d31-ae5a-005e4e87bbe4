@@ -98,6 +98,7 @@ def test_buffer_zero_infeasible_but_one_feasible():
     stc0 = _stc(BUFFER_ZERO_INFEASIBLE)
     r0 = find_earliest_plan(stc0)
     assert not r0.feasible, "饱和共享分歧冲突下 B=0 应无解"
+    assert not r0.cutoff, "B=0 的无解必须在预算内被证实（而非未判定）"
     diag = diagnose(stc0)
     assert "buffer_capacity" in diag["codes"]
     assert ["buffer"] in diag["relaxation_minimal_sets"]

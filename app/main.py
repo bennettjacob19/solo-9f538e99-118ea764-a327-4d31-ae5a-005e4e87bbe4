@@ -112,6 +112,15 @@ def create_session(
                 for i, a in enumerate(sess.result.actions or ())
             ],
         }
+    if sess.status == "undetermined":
+        return {
+            "session_id": sess.session_id,
+            "status": "undetermined",
+            "hint": "节点预算内未判定（既未证实最早方案也未证实无解），未做任何改动；"
+                    "可简化输入或提高预算后重试",
+            "search_nodes": sess.result.nodes,
+            "elapsed_ms": round(sess.result.elapsed_ms, 2),
+        }
     return {
         "session_id": sess.session_id,
         "status": "infeasible",
@@ -160,7 +169,12 @@ def run_session(session_id: str) -> dict[str, Any]:
     if sess is None:
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在或已随重启消失")
     if sess.status != "feasible":
-        raise HTTPException(status_code=409, detail="该会话无解，旧表照用")
+        reason = (
+            "该会话在节点预算内未判定，未做任何改动"
+            if sess.status == "undetermined"
+            else "该会话无解，旧表照用"
+        )
+        raise HTTPException(status_code=409, detail=reason)
     store.run_remaining(sess)
     return store.detail(sess)
 

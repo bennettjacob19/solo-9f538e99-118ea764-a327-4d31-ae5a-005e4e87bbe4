@@ -11,7 +11,10 @@
 严格模式（规划器与正式逐拍执行使用）下，包在当前交换机必须能找到
 其放行时所在路径版本对应的下一跳表项，否则该迁移被判为非法——
 这保证输出的方案中“已入网的包沿放行时生效的路径走完”。
-非严格的 what-if 复放在 app.whatif 中，用于演示强改表的真实后果。
+为满足该保证，共享分歧机（两路都经过、新旧下一跳不同）在表容放不下
+两个版本时，允许把表项临时恢复为旧下一跳、稍后再换回新下一跳；
+入口平面仍然只允许旧→新切一次。非严格的 what-if 复放在 app.whatif 中，
+用于演示强改表的真实后果。
 """
 
 from __future__ import annotations
@@ -372,14 +375,35 @@ def static_deadline_lower_bound(stc: Static) -> tuple[int, list[str]]:
     return worst, notes
 
 
+def _old_version_packet_possible(stc: Static, state: State) -> bool:
+    """此后是否还可能有“旧路版本”的包需要旧路表项。
+
+    入口还在旧平面时，后续放行仍可能走旧路；已在网的旧版本包更是必须要旧项。
+    除此之外（已切新平面且在网旧包已全部送达），恢复旧下一跳不可能被任何包使用，
+    剪掉它不影响完备性，只去掉注定无用的分支。
+    """
+    if state.plane == PLANE_OLD:
+        return True
+    return any(pk.st == ST_NET and pk.ver == PLANE_OLD for pk in state.pks)
+
+
 def candidate_ops(stc: Static, state: State) -> list[Op]:
-    """当前表态下所有“看起来朝目标推进”的合法候选操作（noop 兜底放最后）。"""
+    """当前表态下所有“看起来朝目标推进”的合法候选操作（noop 兜底放最后）。
+
+    除朝目标的 增新/换旧→新/撤旧 外，还包含**共享分歧机的临时恢复**：
+    新旧两路都经过、但下一跳不同的交换机，在表容放不下两个版本时，
+    允许把已换成新下一跳的表项临时替换回旧下一跳（之后仍可再换回新下一跳），
+    让错峰经过的旧版本在途包得以继续沿放行时路径走完。
+    """
     ops: list[Op] = []
     items = state.items
 
     adds: list[Op] = []
     reps: list[Op] = []
+    restores: list[Op] = []
     dels: list[Op] = []
+
+    old_still_needed = _old_version_packet_possible(stc, state)
 
     for s in stc.switches:
         old_nh = stc.old_nh.get(s)
@@ -401,13 +425,26 @@ def candidate_ops(stc: Static, state: State) -> list[Op]:
         ):
             reps.append(("rep", s, old_nh, new_nh))
 
+        # 共享分歧机的临时恢复：新下一跳 -> 旧下一跳（之后可再换回）。
+        # 仅当旧路版本的包还可能经过本机时才生成（见 _old_version_packet_possible）。
+        if (
+            old_still_needed
+            and old_nh is not None
+            and new_nh is not None
+            and old_nh != new_nh
+            and has_new
+            and not has_old
+        ):
+            restores.append(("rep", s, new_nh, old_nh))
+
         # 撤旧路专用项
         if old_nh is not None and old_item_is_exclusive(stc, s) and has_old:
             dels.append(("del", s, old_nh))
 
-    # 顺序影响 DFS 找到首个解的速度与“观感”：先铺路、再替换、最后撤旧，noop 兜底。
+    # 顺序影响 DFS 找到首个解的速度与“观感”：先铺路、再替换、临时恢复、最后撤旧，noop 兜底。
     ops.extend(adds)
     ops.extend(reps)
+    ops.extend(restores)
     ops.extend(dels)
     ops.append(("noop",))
     return ops

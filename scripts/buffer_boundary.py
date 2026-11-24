@@ -1,6 +1,6 @@
 """验证缓冲刚性边界：饱和到包 + 共享分歧机 + 新路更近，比较 B=0..3 的存在性。"""
 from app.domain import build_static
-from app.planner import find_plan, plan_best
+from app.planner import find_plan, find_earliest_plan as plan_best
 from app.runner import Runner
 
 K = dict(prefix="p", release_per_tick=None)

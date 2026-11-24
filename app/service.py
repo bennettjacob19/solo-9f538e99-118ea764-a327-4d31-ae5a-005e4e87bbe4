@@ -44,6 +44,9 @@ def solve_and_report(req: DrillRequest, *, node_budget: int = 1_000_000) -> dict
         runner = Runner(stc)
         runner.run(result.actions)
         return feasible_report(stc, result, runner)
+    if result.cutoff:
+        # 预算耗尽：既未证实最早方案也未证实无解——不执行、不做无解归因。
+        return undetermined_report(stc, result)
     diag = diagnose(stc)
     return infeasible_report(stc, result, diag)
 
@@ -54,12 +57,13 @@ def feasible_report(stc: Static, result: FindResult, runner: Runner) -> dict[str
         "status": "feasible",
         "summary_zh": (
             f"第 {stc.deadline} 拍期限内存在方案：第 {summ['executed_ticks']} 拍达成目标"
-            f"（全部 {len(stc.packets)} 个包送达、入口已切新路、旧路专用表项撤净）。"
-            "可逐拍查看 tables / buffer / hops。"
+            f"（全部 {len(stc.packets)} 个包送达、入口已切新路、旧路专用表项撤净）；"
+            "经逐层完备搜索证实这是最早完成拍。可逐拍查看 tables / buffer / hops。"
         ),
         "prefix": stc.prefix,
         "deadline": stc.deadline,
         "goal_tick": summ["executed_ticks"],
+        "goal_tick_proven_earliest": True,
         "search_nodes": result.nodes,
         "elapsed_ms": round(result.elapsed_ms, 2),
         "plan_overview": plan_overview(stc, result.actions or ()),
@@ -68,6 +72,30 @@ def feasible_report(stc: Static, result: FindResult, runner: Runner) -> dict[str
         **summ,
         "diagnosis": None,
         "old_tables_kept": False,
+    }
+
+
+def undetermined_report(stc: Static, result: FindResult) -> dict[str, Any]:
+    return {
+        "status": "undetermined",
+        "summary_zh": (
+            f"节点预算（{result.nodes} 个状态）耗尽，既未证实存在最早完成方案，"
+            "也未证实无解；未对设备做任何改动，旧表照用，且不做无解归因。"
+            "可简化输入（更短期限/更少包）或提高预算后重试。"
+        ),
+        "prefix": stc.prefix,
+        "deadline": stc.deadline,
+        "goal_tick": None,
+        "goal_tick_proven_earliest": False,
+        "search_nodes": result.nodes,
+        "elapsed_ms": round(result.elapsed_ms, 2),
+        "search_cutoff": True,
+        "plan_overview": [],
+        "ticks": [],
+        "packet_trajectories": [],
+        "initial_tables": table_view(stc, initial_state(stc)),
+        "old_tables_kept": True,
+        "diagnosis": None,
     }
 
 
@@ -83,9 +111,10 @@ def infeasible_report(
         "prefix": stc.prefix,
         "deadline": stc.deadline,
         "goal_tick": None,
+        "goal_tick_proven_earliest": False,
         "search_nodes": result.nodes,
         "elapsed_ms": round(result.elapsed_ms, 2),
-        "search_cutoff": result.cutoff,
+        "search_cutoff": False,
         "plan_overview": [],
         "ticks": [],
         "packet_trajectories": [],

@@ -62,6 +62,21 @@ DEADLINE_INFEASIBLE: dict[str, Any] = {
     "deadline": 12,
 }
 
+# 6) 共享分歧机临时恢复：旧 I-D-A-C-B-E、新 I-C-A-E，共享机 C 容量 1。
+#    A 容量 2（双项共存），存量包 E01 压在 A，第 1、2、4 拍到包，缓冲 0，期限 8 拍。
+#    唯一解法是 C 在第 4 拍把表项临时恢复为旧下一跳（让旧路包 A1 过），
+#    第 5 拍再换回新下一跳（让新路包 A4 过）——曾因此被误判无解。
+SHARED_RESTORE_FLIP: dict[str, Any] = {
+    "prefix": "192.0.2.64/26",
+    "old_path": ["I", "D", "A", "C", "B", "E"],
+    "new_path": ["I", "C", "A", "E"],
+    "table_capacities": {"I": 1, "D": 1, "A": 2, "C": 1, "B": 1, "E": 1},
+    "existing_packets": [{"id": "E01", "switch": "A"}],
+    "arrival_ticks": [1, 2, 4],
+    "buffer_capacity": 0,
+    "deadline": 8,
+}
+
 # 6) What-if：存量包 E01 此刻就在共享分歧机 S，第 1 拍直接 replace S 的下一跳。
 #    第 2 拍又把新路 B→E 补齐，于是旧包被静默改道、最终“偏路径送达”——
 #    包没丢，但违反了“沿放行时路径走完”，在真实运维里属于绕过审计路径。
@@ -127,6 +142,12 @@ PLAN_EXAMPLES: dict[str, dict[str, Any]] = {
         "description": "入口容量 2，可同时挂旧/新下一跳；含 1 个存量包和第 2、6 拍到包。",
         "value": FEASIBLE_DUAL,
     },
+    "共享机临时恢复旧下一跳_有解": {
+        "summary": "有解·共享分歧机临时恢复旧下一跳再换回（曾误判无解）",
+        "description": "旧 I-D-A-C-B-E / 新 I-C-A-E，A 容量 2 其余 1，缓冲 0，期限 8 拍；"
+                       "共享机 C 第 4 拍临时恢复旧下一跳、第 5 拍换回，第 8 拍（经证实最早）完成。",
+        "value": SHARED_RESTORE_FLIP,
+    },
     "容量1_等包离开再替换_有解": {
         "summary": "有解·表容=1 的等待与原子替换",
         "value": FEASIBLE_REPLACE_WAIT,
@@ -166,6 +187,7 @@ ALL_FIXTURES: dict[str, Any] = {
     "buffer_boundary_ok": BUFFER_BOUNDARY_OK,
     "buffer_zero_infeasible": BUFFER_ZERO_INFEASIBLE,
     "deadline_infeasible": DEADLINE_INFEASIBLE,
+    "shared_restore_flip": SHARED_RESTORE_FLIP,
     "inflight_whatif": INFLIGHT_WHATIF,
     "inflight_replace_blackhole": INFLIGHT_REPLACE_BLACKHOLE,
     "inflight_delete_whatif": INFLIGHT_DELETE_WHATIF,

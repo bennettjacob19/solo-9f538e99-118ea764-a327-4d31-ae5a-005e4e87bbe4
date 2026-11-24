@@ -93,7 +93,8 @@ async function loadFixtures(){
   const names = {
     feasible_dual:'有解·双版本共存', feasible_replace_wait:'有解·表容1等待替换',
     buffer_boundary_ok:'有解·缓冲1错峰', buffer_zero_infeasible:'无解·缓冲0',
-    deadline_infeasible:'无解·期限不足', inflight_whatif:'What-if·在途包遇replace',
+    deadline_infeasible:'无解·期限不足', shared_restore_flip:'有解·共享机临时恢复旧下一跳',
+    inflight_whatif:'What-if·在途包遇replace',
     inflight_delete_whatif:'What-if·在途包遇delete'
   };
   const sel = $('fixtureSelect');
@@ -162,10 +163,11 @@ function renderDiagnosis(d){
   </div>`;
 }
 function renderSummary(d){
-  const cls=d.status==='feasible'?'ok':'bad';
-  $('summaryCard').innerHTML=`<h3 class="${cls}" style="margin:0 0 6px">${d.status==='feasible'?'✅ 有解':'⛔ 无解'}</h3>
+  const title=d.status==='feasible'?'✅ 有解':(d.status==='undetermined'?'❓ 未判定':'⛔ 无解');
+  const cls=d.status==='feasible'?'ok':(d.status==='undetermined'?'warn':'bad');
+  $('summaryCard').innerHTML=`<h3 class="${cls}" style="margin:0 0 6px">${title}</h3>
     <div>${d.summary_zh||''}</div>
-    <div class="muted" style="margin-top:6px">搜索节点 ${d.search_nodes??'-'} ｜ 耗时 ${d.elapsed_ms??'-'} ms ${d.goal_tick?`｜ 目标拍 ${d.goal_tick}`:''}</div>`;
+    <div class="muted" style="margin-top:6px">搜索节点 ${d.search_nodes??'-'} ｜ 耗时 ${d.elapsed_ms??'-'} ms ${d.goal_tick?`｜ 目标拍 ${d.goal_tick}（经证实最早）`:''}</div>`;
 }
 
 $('runPlan').onclick = async ()=>{
@@ -186,8 +188,10 @@ $('createSession').onclick = async ()=>{
   const d=await r.json();
   if(!r.ok){ alert('建会话失败：'+JSON.stringify(d)); return; }
   sessionId=d.session_id;
-  renderSummary({status:d.status,summary_zh:d.status==='feasible'?`会话 ${sessionId} 已建，计划 ${d.total_planned_ticks} 拍，点“下一拍”执行。`:'该配置无解，旧表照用。',search_nodes:d.search_nodes,elapsed_ms:d.elapsed_ms});
-  if(d.status==='infeasible'){ renderDiagnosis(d.diagnosis); return; }
+  const hint=d.status==='feasible'?`会话 ${sessionId} 已建，计划 ${d.total_planned_ticks} 拍，点“下一拍”执行。`
+    :(d.status==='undetermined'?'该配置在节点预算内未判定，未做任何改动。':'该配置无解，旧表照用。');
+  renderSummary({status:d.status,summary_zh:hint,search_nodes:d.search_nodes,elapsed_ms:d.elapsed_ms});
+  if(d.status!=='feasible'){ if(d.status==='infeasible') renderDiagnosis(d.diagnosis); return; }
   $('stepBtn').disabled=false; $('runAllBtn').disabled=false;
   $('sessInfo').textContent=`${sessionId} · 0/${d.total_planned_ticks}`;
 };

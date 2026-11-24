@@ -13,7 +13,7 @@ from typing import Any
 from .domain import Static
 from .planner import FindResult, diagnose, find_earliest_plan
 from .runner import Runner
-from .service import infeasible_report, plan_overview
+from .service import infeasible_report, plan_overview, undetermined_report
 
 
 @dataclass
@@ -22,7 +22,7 @@ class Session:
     request_dict: dict[str, Any]
     stc: Static
     result: FindResult
-    status: str  # feasible | infeasible
+    status: str  # feasible | infeasible | undetermined
     runner: Runner | None = None
     diagnosis: dict[str, Any] | None = None
     error_report: dict[str, Any] | None = None
@@ -48,6 +48,13 @@ class SessionStore:
                 session_id=sid, request_dict=request_dict, stc=stc,
                 result=result, status="feasible", runner=Runner(stc),
             )
+        elif result.cutoff:
+            # 预算内未判定：不执行、不归因，仅记录初始表项供查看。
+            sess = Session(
+                session_id=sid, request_dict=request_dict, stc=stc,
+                result=result, status="undetermined",
+                error_report=undetermined_report(stc, result),
+            )
         else:
             diag = diagnose(stc)
             report = infeasible_report(stc, result, diag)
@@ -69,7 +76,12 @@ class SessionStore:
     def step(self, sess: Session) -> dict[str, Any]:
         with sess.lock:
             if sess.status != "feasible" or sess.runner is None or sess.result.actions is None:
-                return {"conflict": True, "detail": "该会话无解，旧表照用，不能逐拍执行"}
+                reason = (
+                    "该会话在节点预算内未判定，未做任何改动，不能逐拍执行"
+                    if sess.status == "undetermined"
+                    else "该会话无解，旧表照用，不能逐拍执行"
+                )
+                return {"conflict": True, "detail": reason}
             if sess.finished:
                 return {"conflict": True, "detail": "方案已执行完，可 GET 会话查看完整报告"}
             action = sess.result.actions[sess.runner.tick]
@@ -85,6 +97,21 @@ class SessionStore:
                     sess.runner.step(sess.result.actions[sess.runner.tick])
 
     def detail(self, sess: Session) -> dict[str, Any]:
+        if sess.status == "undetermined":
+            assert sess.error_report is not None
+            return {
+                "session_id": sess.session_id,
+                "status": "undetermined",
+                "feasible": False,
+                "finished": True,
+                "config": sess.request_dict,
+                "summary_zh": sess.error_report["summary_zh"],
+                "diagnosis": None,
+                "initial_tables": sess.error_report["initial_tables"],
+                "old_tables_kept": True,
+                "search_nodes": sess.result.nodes,
+                "elapsed_ms": round(sess.result.elapsed_ms, 2),
+            }
         if sess.status == "infeasible":
             assert sess.error_report is not None
             return {

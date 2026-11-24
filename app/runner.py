@@ -27,19 +27,34 @@ def describe_op(op: tuple[Any, ...], stc: Static | None = None) -> dict[str, Any
                 "label_zh": "本拍不改表（noop）"}
     if kind == "add":
         _, s, nh = op
-        ver = "new" if stc and stc.new_nh.get(s) == nh else None
+        if stc and stc.new_nh.get(s) == nh:
+            ver, suffix = "new", "（新路下一跳）"
+        elif stc and stc.old_nh.get(s) == nh:
+            ver, suffix = "old", "（旧路下一跳）"
+        else:
+            ver, suffix = None, ""
         return {"kind": "add", "switch": s, "nexthop": nh, "version": ver,
-                "label_zh": f"在 {s} 增表项：前缀 → {nh}"
-                            + ("（新路下一跳）" if ver == "new" else "")}
+                "label_zh": f"在 {s} 增表项：前缀 → {nh}{suffix}"}
     if kind == "del":
         _, s, nh = op
-        return {"kind": "delete", "switch": s, "nexthop": nh, "version": "old",
-                "label_zh": f"删除 {s} 的旧路专用表项：前缀 → {nh}"}
+        if stc and stc.new_nh.get(s) == nh and stc.old_nh.get(s) != nh:
+            ver, label = "new", f"删除 {s} 的新路表项：前缀 → {nh}"
+        else:
+            ver, label = "old", f"删除 {s} 的旧路专用表项：前缀 → {nh}"
+        return {"kind": "delete", "switch": s, "nexthop": nh, "version": ver,
+                "label_zh": label}
     if kind == "rep":
-        _, s, old_nh, new_nh = op
-        return {"kind": "replace", "switch": s, "old_nexthop": old_nh,
-                "nexthop": new_nh, "version": "old_to_new",
-                "label_zh": f"替换 {s} 表项下一跳：{old_nh} → {new_nh}（一条操作）"}
+        _, s, from_nh, to_nh = op
+        # 标对替换方向：换向新路下一跳，还是临时恢复旧路下一跳
+        if stc and stc.new_nh.get(s) == to_nh and stc.old_nh.get(s) != to_nh:
+            direction, suffix = "to_new", "换为新路下一跳"
+        elif stc and stc.old_nh.get(s) == to_nh and stc.new_nh.get(s) != to_nh:
+            direction, suffix = "to_old_restore", "临时恢复旧路下一跳"
+        else:
+            direction, suffix = "unknown", "一条操作"
+        return {"kind": "replace", "switch": s, "old_nexthop": from_nh,
+                "nexthop": to_nh, "version": direction,
+                "label_zh": f"替换 {s} 表项下一跳：{from_nh} → {to_nh}（{suffix}）"}
     return {"kind": str(kind), "label_zh": str(op)}
 
 

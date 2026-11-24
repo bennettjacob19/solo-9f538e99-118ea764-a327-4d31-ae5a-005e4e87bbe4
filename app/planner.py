@@ -1,4 +1,10 @@
-"""在 ≤12 拍的小状态空间内做完备 DFS 搜索，并在无解时做约束归因。"""
+"""在 ≤12 拍的小状态空间内做完备 DFS 搜索，并在无解时做约束归因。
+
+判定口径（与接口约定一致）：
+  - feasible     ：预算内找到方案（find_earliest_plan 还保证完成拍最早）；
+  - infeasible   ：预算内完整搜完状态空间，证实无解；
+  - undetermined ：节点预算（默认 100 万）耗尽，既未找到方案也未证实无解。
+"""
 
 from __future__ import annotations
 
@@ -28,9 +34,22 @@ class FindResult:
     elapsed_ms: float
     cutoff: bool = False
 
+    @property
+    def status(self) -> str:
+        if self.feasible:
+            return "feasible"
+        return "undetermined" if self.cutoff else "infeasible"
+
+
+class _BudgetCutoff(Exception):
+    """节点预算耗尽：立即中止整棵搜索（结论只能是“未判定”，继续搜无意义）。"""
+
 
 def find_plan(stc: Static, *, node_budget: int = 1_000_000) -> FindResult:
-    """返回任意一个合法方案。深度受 deadline（≤12）限制，状态做记忆化失败剪枝。"""
+    """返回任意一个合法方案。深度受 deadline（≤12）限制，状态做记忆化失败剪枝。
+
+    展开状态数严格不超过 node_budget；耗尽即中止并以 cutoff=True 报告“未判定”。
+    """
     t0 = time.perf_counter()
     start = initial_state(stc)
     if not earliest_delivery_bound_ok(stc, start, 0):
@@ -38,10 +57,9 @@ def find_plan(stc: Static, *, node_budget: int = 1_000_000) -> FindResult:
 
     failed: set[tuple[int, State]] = set()
     nodes = 0
-    cutoff = False
 
     def dfs(tick: int, state: State) -> tuple[Action, ...] | None:
-        nonlocal nodes, cutoff
+        nonlocal nodes
         if goal_reached(stc, state):
             return ()
         if tick > stc.deadline:
@@ -50,10 +68,9 @@ def find_plan(stc: Static, *, node_budget: int = 1_000_000) -> FindResult:
         if key in failed:
             return None
 
+        if nodes >= node_budget:
+            raise _BudgetCutoff
         nodes += 1
-        if nodes > node_budget:
-            cutoff = True
-            return None
 
         # 此刻到 deadline 还剩 deadline-tick+1 次操作机会
         if min_ops_remaining(stc, state) > stc.deadline - tick + 1:
@@ -76,36 +93,49 @@ def find_plan(stc: Static, *, node_budget: int = 1_000_000) -> FindResult:
         failed.add(key)
         return None
 
-    actions = dfs(1, start)
+    cutoff = False
+    try:
+        actions = dfs(1, start)
+    except _BudgetCutoff:
+        actions = None
+        cutoff = True
     elapsed = (time.perf_counter() - t0) * 1000
-    if cutoff and actions is None:
-        return FindResult(False, None, nodes, elapsed, cutoff=True)
-    return FindResult(actions is not None, actions, nodes, elapsed)
+    return FindResult(actions is not None, actions, nodes, elapsed, cutoff=cutoff)
 
 
 def find_earliest_plan(stc: Static, *, node_budget: int = 1_000_000) -> FindResult:
     """在 1..deadline 拍中逐层尝试，返回完成拍最早的合法方案。
 
-    浅层搜索很快；这样 /docs 里看到的是“尽快铺路/切换/撤旧”的方案，
-    而不是拖到最后一拍的投机动作序列。
+    全部浅层共用同一个节点预算（一次求解最多展开 node_budget 个状态）：
+    浅层被证实无解后才加深；任一浅层因预算耗尽而无法判定时，整体只能报
+    “未判定”——此时既不能声称最早，也不能声称无解。
     """
-    last: FindResult | None = None
-    total_nodes = 0
     t0 = time.perf_counter()
+    total_nodes = 0
     for horizon in range(1, stc.deadline + 1):
+        remaining = node_budget - total_nodes
+        if remaining <= 0:
+            return FindResult(
+                False, None, total_nodes,
+                (time.perf_counter() - t0) * 1000, cutoff=True,
+            )
         sub = replace(stc, deadline=horizon)
-        r = find_plan(sub, node_budget=node_budget)
+        r = find_plan(sub, node_budget=remaining)
         total_nodes += r.nodes
-        last = r
         if r.feasible:
+            # 更浅的每一层都已被完整搜完并证实无解，本层即经证实的最早完成拍。
             return FindResult(
                 True, r.actions, total_nodes,
-                (time.perf_counter() - t0) * 1000, cutoff=r.cutoff,
+                (time.perf_counter() - t0) * 1000,
             )
-    assert last is not None
+        if r.cutoff:
+            return FindResult(
+                False, None, total_nodes,
+                (time.perf_counter() - t0) * 1000, cutoff=True,
+            )
     return FindResult(
         False, None, total_nodes,
-        (time.perf_counter() - t0) * 1000, cutoff=last.cutoff,
+        (time.perf_counter() - t0) * 1000,
     )
 
 
@@ -141,7 +171,16 @@ def _relaxed(stc: Static, *, horizon12: bool, inf_buffer: bool, big_tables: bool
 
 
 def diagnose(stc: Static, *, node_budget: int = 400_000) -> dict[str, Any]:
-    """对无解配置做约束归因：分别放松 期限 / 缓冲 / 表容，看重放松后是否可解。"""
+    """对已证实无解的配置做约束归因：分别放松 期限 / 缓冲 / 表容，看重放松后是否可解。
+
+    放松实验与正式求解使用完全相同的改表规则（含共享分歧机临时恢复）。
+    一个放松组合只有同时满足两条才会被列为“最小”：
+      1. 该组合在节点预算内**被证实可行**；
+      2. 它的所有真子集（含空集＝原配置）都**被证实无解**。
+    预算耗尽的组合不算证据，单独列入 relaxation_undetermined。
+    """
+    from itertools import combinations
+
     from .domain import static_deadline_lower_bound
 
     earliest_worst, timing_notes = static_deadline_lower_bound(stc)
@@ -174,37 +213,36 @@ def diagnose(stc: Static, *, node_budget: int = 400_000) -> dict[str, Any]:
         "tables": "放宽各交换机表项上限",
     }
 
-    def feasible_with(mask: tuple[str, ...]) -> bool:
-        r = _relaxed(
-            stc,
-            horizon12="deadline" in mask,
-            inf_buffer="buffer" in mask,
-            big_tables="tables" in mask,
-        )
-        return find_plan(r, node_budget=node_budget).feasible
-
-    feasible_masks: list[tuple[str, ...]] = []
-    cutoff_masks: list[tuple[str, ...]] = []
-
-    # 先单约束放松，再两两，最后全部，寻找“最小可行放松集”。
+    # 每个放松组合的判定结论：feasible / infeasible / undetermined。
+    # 空调用前提：原配置（空组合）已被证实无解。
+    outcome: dict[tuple[str, ...], str] = {(): "infeasible"}
     for r in (1, 2, 3):
-        from itertools import combinations
         for mask in combinations(dims, r):
-            outcome = find_plan(_relaxed(
+            res = find_plan(_relaxed(
                 stc,
                 horizon12="deadline" in mask,
                 inf_buffer="buffer" in mask,
                 big_tables="tables" in mask,
             ), node_budget=node_budget)
-            if outcome.feasible:
-                feasible_masks.append(mask)
-            elif outcome.cutoff:
-                cutoff_masks.append(mask)
+            outcome[mask] = res.status
 
-    minimal_sets: list[tuple[str, ...]] = []
-    for mask in feasible_masks:
-        if not any(set(smaller) < set(mask) for smaller in feasible_masks):
-            minimal_sets.append(mask)
+    def all_proper_subsets_proven_infeasible(mask: tuple[str, ...]) -> bool:
+        # combinations 保持 dims 的顺序，子元组与 outcome 的键写法一致；
+        # 含空组合 ()（＝原配置，调用前提已证实无解）。
+        for r in range(0, len(mask)):
+            for sub in combinations(mask, r):
+                if outcome[tuple(sub)] != "infeasible":
+                    return False
+        return True
+
+    minimal_sets: list[tuple[str, ...]] = [
+        mask for mask in outcome
+        if mask and outcome[mask] == "feasible"
+        and all_proper_subsets_proven_infeasible(mask)
+    ]
+    undetermined_masks: list[tuple[str, ...]] = [
+        mask for mask in outcome if outcome[mask] == "undetermined"
+    ]
 
     # 结构性兜底：全部放宽并给足 24 拍，正常输入必然可解。
     structural = find_plan(
@@ -250,12 +288,19 @@ def diagnose(stc: Static, *, node_budget: int = 400_000) -> dict[str, Any]:
             "说明主要受演练拍数（完成期限 + 每拍一次操作/逐拍传播）的综合时序约束。"
         )
         codes.append("horizon_timing")
+    elif structural.cutoff:
+        explanations.append("结构性放宽实验也触及节点预算，无法给出归因结论。")
+        codes.append("undetermined_budget")
     else:
         explanations.append("即使大幅放宽期限、缓冲与表容仍不可解，可能是输入模型本身的问题。")
         codes.append("structural")
 
-    if cutoff_masks:
-        explanations.append("（部分归因搜索触及节点预算，结论以已完成的放松实验为准。）")
+    if undetermined_masks:
+        names = ["+".join(m) for m in undetermined_masks]
+        explanations.append(
+            "（以下放松组合在节点预算内未能判定，未计入最小放松集："
+            + "、".join(names) + "。）"
+        )
 
     # 去重保序
     seen: set[str] = set()
@@ -269,5 +314,10 @@ def diagnose(stc: Static, *, node_budget: int = 400_000) -> dict[str, Any]:
         "minimum_table_ops": min_ops,
         "deadline": stc.deadline,
         "relaxation_minimal_sets": [list(m) for m in minimal_sets],
+        "relaxation_undetermined": [list(m) for m in undetermined_masks],
+        "relaxation_outcomes": {
+            "+".join(mask) if mask else "(original)": res
+            for mask, res in sorted(outcome.items())
+        },
         "structural_extended_feasible": structural.feasible,
     }

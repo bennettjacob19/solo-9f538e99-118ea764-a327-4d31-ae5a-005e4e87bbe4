@@ -9,8 +9,10 @@ from app.examples import (
     DEADLINE_INFEASIBLE,
     FEASIBLE_DUAL,
     INFLIGHT_WHATIF,
+    SHARED_RESTORE_FLIP,
 )
 from app.main import app
+from app.planner import FindResult
 
 client = TestClient(app)
 
@@ -60,6 +62,51 @@ def test_plan_endpoint_deadline():
     d = client.post("/api/v1/plans", json=DEADLINE_INFEASIBLE).json()
     assert d["status"] == "infeasible"
     assert "deadline_propagation" in d["diagnosis"]["codes"]
+
+
+def test_plan_endpoint_shared_restore_flip():
+    """曾误判无解的场景：现在经 Docs 同款接口返回第 8 拍（经证实最早）的方案。"""
+    r = client.post("/api/v1/plans", json=SHARED_RESTORE_FLIP)
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["status"] == "feasible"
+    assert d["goal_tick"] == 8 and d["goal_tick_proven_earliest"] is True
+    kinds = [
+        (t["tick"], t["table_action"].get("version"))
+        for t in d["ticks"] if t["table_action"]["kind"] == "replace"
+    ]
+    assert ("to_old_restore" in [v for _, v in kinds]), "应标出临时恢复旧下一跳"
+    # 会话逐拍执行同一方案，替换方向标注一致
+    sid = client.post("/api/v1/sessions", json=SHARED_RESTORE_FLIP).json()["session_id"]
+    seen_restore = False
+    for _ in range(8):
+        sr = client.post(f"/api/v1/sessions/{sid}/step", json={})
+        assert sr.status_code == 200, sr.text
+        act = sr.json()["tick"]["table_action"]
+        if act["kind"] == "replace" and act.get("version") == "to_old_restore":
+            seen_restore = True
+            assert "临时恢复旧路下一跳" in act["label_zh"]
+    assert seen_restore
+    detail = client.get(f"/api/v1/sessions/{sid}").json()
+    assert detail["goal_reached"] is True
+
+
+def test_session_undetermined_refuses_step_409(monkeypatch):
+    import app.sessions as sess_mod
+
+    monkeypatch.setattr(
+        sess_mod, "find_earliest_plan",
+        lambda stc, **kw: FindResult(False, None, 1_000_000, 1.0, cutoff=True),
+    )
+    r = client.post("/api/v1/sessions", json=SHARED_RESTORE_FLIP)
+    assert r.status_code == 200
+    assert r.json()["status"] == "undetermined"
+    sid = r.json()["session_id"]
+    assert client.post(f"/api/v1/sessions/{sid}/step", json={}).status_code == 409
+    assert client.post(f"/api/v1/sessions/{sid}/run").status_code == 409
+    detail = client.get(f"/api/v1/sessions/{sid}").json()
+    assert detail["status"] == "undetermined"
+    assert detail["diagnosis"] is None and detail["old_tables_kept"] is True
 
 
 def test_session_step_flow_and_409_at_end():
